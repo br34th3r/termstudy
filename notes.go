@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -38,13 +40,23 @@ type editedMsg struct {
 	err  error
 }
 
+// noteCreatedMsg carries the result of creating a new note file.
+type noteCreatedMsg struct {
+	path string
+	err  error
+}
+
 // notesModel is the split-pane note browser: a file list on the left and a
 // rendered markdown preview on the right.
 type notesModel struct {
 	cfg      Config
 	list     list.Model
 	preview  viewport.Model
-	width    int
+	input      textinput.Model
+	creating   bool // entering a new note's title
+	renaming   bool // editing the selected note's filename
+	confirming bool // delete confirmation pending
+	width      int
 	height   int
 	ready    bool
 	curPath  string // path currently shown in preview
@@ -56,7 +68,12 @@ func newNotesModel(cfg Config) notesModel {
 	l.Title = "Notes"
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
-	return notesModel{cfg: cfg, list: l}
+
+	ti := textinput.New()
+	ti.Placeholder = "new note title (e.g. TCP handshake)"
+	ti.CharLimit = 128
+
+	return notesModel{cfg: cfg, list: l, input: ti}
 }
 
 func (m notesModel) Init() tea.Cmd {
@@ -68,6 +85,14 @@ func (m notesModel) loadNotes() tea.Cmd {
 	return func() tea.Msg {
 		notes, err := LoadNotes(dir)
 		return notesLoadedMsg{notes: notes, err: err}
+	}
+}
+
+func (m notesModel) createNote(title string) tea.Cmd {
+	dir := m.cfg.NotesDir
+	return func() tea.Msg {
+		path, err := CreateNote(dir, title)
+		return noteCreatedMsg{path: path, err: err}
 	}
 }
 
@@ -132,10 +157,47 @@ func (m notesModel) update(msg tea.Msg) (notesModel, tea.Cmd) {
 		// Reload list (titles may change) and re-render the edited note.
 		return m, m.loadNotes()
 
+	case noteCreatedMsg:
+		if msg.err != nil {
+			m.loadErr = msg.err
+			return m, nil
+		}
+		// Open the new note in $EDITOR; editedMsg then reloads the list.
+		return m, editPath(msg.path)
+
 	case tea.KeyMsg:
+		if m.creating || m.renaming {
+			return m.updateInput(msg)
+		}
+		if m.confirming {
+			return m.updateConfirmDelete(msg)
+		}
+
 		switch msg.String() {
 		case "esc", "q":
 			return m, switchTo(screenMenu)
+		case "a":
+			m.creating = true
+			m.loadErr = nil
+			m.input.SetValue("")
+			m.input.Focus()
+			return m, textinput.Blink
+		case "R":
+			if it, ok := m.list.SelectedItem().(noteItem); ok {
+				m.renaming = true
+				m.loadErr = nil
+				m.input.SetValue(it.note.Title)
+				m.input.CursorEnd()
+				m.input.Focus()
+				return m, textinput.Blink
+			}
+			return m, nil
+		case "d":
+			if _, ok := m.list.SelectedItem().(noteItem); ok {
+				m.confirming = true
+				m.loadErr = nil
+			}
+			return m, nil
 		case "e", "enter":
 			return m, m.editSelected()
 		case "r":
@@ -156,6 +218,69 @@ func (m notesModel) update(msg tea.Msg) (notesModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+// updateInput drives the shared text input used for creating and renaming.
+func (m notesModel) updateInput(msg tea.KeyMsg) (notesModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.creating, m.renaming = false, false
+		m.input.Blur()
+		m.input.SetValue("")
+		return m, nil
+	case "enter":
+		val := strings.TrimSpace(m.input.Value())
+		creating := m.creating
+		m.creating, m.renaming = false, false
+		m.input.Blur()
+		m.input.SetValue("")
+		if val == "" {
+			return m, nil
+		}
+		if creating {
+			return m, m.createNote(val)
+		}
+		// Renaming the selected note.
+		if it, ok := m.list.SelectedItem().(noteItem); ok {
+			oldPath := it.note.Path
+			return m, func() tea.Msg {
+				if _, err := RenameNote(oldPath, val); err != nil {
+					return errMsg{err}
+				}
+				notes, err := LoadNotes(m.cfg.NotesDir)
+				return notesLoadedMsg{notes: notes, err: err}
+			}
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// updateConfirmDelete handles the y/n confirmation for deleting a note.
+func (m notesModel) updateConfirmDelete(msg tea.KeyMsg) (notesModel, tea.Cmd) {
+	m.confirming = false
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	it, ok := m.list.SelectedItem().(noteItem)
+	if !ok {
+		return m, nil
+	}
+	path := it.note.Path
+	// The deleted note may be the one shown in the preview; clear it.
+	if path == m.curPath {
+		m.curPath = ""
+		m.preview.SetContent("")
+	}
+	return m, func() tea.Msg {
+		if err := DeleteNote(path); err != nil {
+			return errMsg{err}
+		}
+		notes, err := LoadNotes(m.cfg.NotesDir)
+		return notesLoadedMsg{notes: notes, err: err}
+	}
 }
 
 // renderSelected renders the highlighted note's markdown if it isn't already shown.
@@ -195,7 +320,12 @@ func (m notesModel) editSelected() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	path := it.note.Path
+	return editPath(it.note.Path)
+}
+
+// editPath suspends the TUI and opens path in $EDITOR, emitting editedMsg when
+// the editor exits.
+func editPath(path string) tea.Cmd {
 	editor, args := editorCommand()
 	args = append(args, path)
 	c := exec.Command(editor, args...)
@@ -205,14 +335,26 @@ func (m notesModel) editSelected() tea.Cmd {
 }
 
 func (m notesModel) view() string {
+	if m.creating {
+		prompt := lipgloss.NewStyle().Padding(1, 2).Render(
+			"New note title:\n\n" + m.input.View() +
+				"\n\nCreates a .md file in this field's notes folder and opens your $EDITOR.")
+		return lipgloss.JoinVertical(lipgloss.Left, prompt, helpBar("enter create · esc cancel"))
+	}
+	if m.renaming {
+		prompt := lipgloss.NewStyle().Padding(1, 2).Render(
+			"Rename note:\n\n" + m.input.View() +
+				"\n\nRenames the file (a .md extension is kept).")
+		return lipgloss.JoinVertical(lipgloss.Left, prompt, helpBar("enter save · esc cancel"))
+	}
 	if m.loadErr != nil {
-		return errLine(m.loadErr) + "\n" + helpBar("esc back")
+		return errLine(m.loadErr) + "\n" + helpBar("a add note · r refresh · esc back")
 	}
 	if len(m.list.Items()) == 0 {
 		msg := lipgloss.NewStyle().Padding(1, 2).Render(
-			"No markdown notes yet.\n\nAdd .md files to:\n  " + m.cfg.NotesDir +
-				"\n\n(Ask Claude to generate study notes here, then press 'r' to refresh.)")
-		return lipgloss.JoinVertical(lipgloss.Left, msg, helpBar("r refresh · esc back"))
+			"No markdown notes yet.\n\nPress 'a' to create one, or add .md files to:\n  " + m.cfg.NotesDir +
+				"\n\n(You can also ask Claude to generate study notes here, then press 'r'.)")
+		return lipgloss.JoinVertical(lipgloss.Left, msg, helpBar("a add note · r refresh · esc back"))
 	}
 
 	left := m.list.View()
@@ -224,7 +366,14 @@ func (m notesModel) view() string {
 		Render(m.preview.View())
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	help := helpBar("↑/↓ select · J/K scroll preview · e/enter edit in $EDITOR · r refresh · esc back")
+	help := helpBar("↑/↓ select · e edit · a add · R rename · d delete · J/K scroll · r refresh · esc back")
+	if m.confirming {
+		name := ""
+		if it, ok := m.list.SelectedItem().(noteItem); ok {
+			name = it.note.Title
+		}
+		help = helpBar(fmt.Sprintf("delete note %q? y confirm · any other key cancel", name))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, help)
 }
 

@@ -139,6 +139,49 @@ func (c Config) CreateField(name string) (string, error) {
 	return safe, nil
 }
 
+// RenameField renames a field by moving its subdirectory under both the notes
+// and decks trees. It returns the sanitized new name actually used, and errors
+// if that name is invalid or already taken by another field.
+func (c Config) RenameField(oldName, newName string) (string, error) {
+	safe := sanitizeField(newName)
+	if safe == "" {
+		return "", fmt.Errorf("invalid field name %q", newName)
+	}
+	if safe == oldName {
+		return safe, nil
+	}
+	for _, dir := range []string{c.NotesDir, c.DecksDir} {
+		if _, err := os.Stat(filepath.Join(dir, safe)); err == nil {
+			return "", fmt.Errorf("field %q already exists", safe)
+		}
+	}
+	// A field may legitimately exist under only one tree; move whichever exist.
+	for _, dir := range []string{c.NotesDir, c.DecksDir} {
+		oldPath := filepath.Join(dir, oldName)
+		if _, err := os.Stat(oldPath); err != nil {
+			continue
+		}
+		if err := os.Rename(oldPath, filepath.Join(dir, safe)); err != nil {
+			return "", err
+		}
+	}
+	return safe, nil
+}
+
+// DeleteField removes a field and everything in it from both the notes and
+// decks trees. This is destructive: all of the field's notes and decks go too.
+func (c Config) DeleteField(name string) error {
+	if sanitizeField(name) == "" {
+		return fmt.Errorf("invalid field name %q", name)
+	}
+	for _, dir := range []string{c.NotesDir, c.DecksDir} {
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // hasAnyField reports whether at least one field subdirectory already exists.
 func (c Config) hasAnyField() bool {
 	for _, dir := range []string{c.NotesDir, c.DecksDir} {
@@ -253,6 +296,74 @@ func LoadNotes(dir string) ([]Note, error) {
 	return notes, nil
 }
 
+// CreateNote creates a new markdown note in dir, seeded with a heading derived
+// from title, and returns the absolute path to the new file. The title doubles
+// as the filename (a .md extension is added if missing). It errors on a blank
+// name or if a note with that filename already exists.
+func CreateNote(dir, title string) (string, error) {
+	name := sanitizeNoteName(title)
+	if name == "" {
+		return "", fmt.Errorf("invalid note name %q", title)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("note %q already exists", name)
+	}
+	heading := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
+	body := "# " + heading + "\n\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// sanitizeNoteName turns a user-entered title into a safe single-segment
+// markdown filename, dropping path separators and ensuring a .md extension.
+func sanitizeNoteName(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.ReplaceAll(title, "/", "-")
+	title = strings.ReplaceAll(title, string(os.PathSeparator), "-")
+	title = strings.Trim(title, ".- ")
+	if title == "" {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(title)) {
+	case ".md", ".markdown":
+	default:
+		title += ".md"
+	}
+	return title
+}
+
+// RenameNote renames a note file in place (within its own directory), deriving
+// a safe filename from newTitle, and returns the new path. It errors if the new
+// name is invalid or a file with that name already exists.
+func RenameNote(oldPath, newTitle string) (string, error) {
+	name := sanitizeNoteName(newTitle)
+	if name == "" {
+		return "", fmt.Errorf("invalid note name %q", newTitle)
+	}
+	newPath := filepath.Join(filepath.Dir(oldPath), name)
+	if newPath == oldPath {
+		return oldPath, nil
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return "", fmt.Errorf("note %q already exists", name)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return "", err
+	}
+	return newPath, nil
+}
+
+// DeleteNote removes a note file from disk.
+func DeleteNote(path string) error {
+	return os.Remove(path)
+}
+
 func seedSampleNote(dir string) {
 	p := filepath.Join(dir, "welcome.md")
 	if _, err := os.Stat(p); err == nil {
@@ -278,7 +389,16 @@ const sampleNote = "# Welcome to termstudy\n\n" +
 	"CyberSecurity or Spanish. termstudy opens on the field picker; press `n` to\n" +
 	"create a new field, then `enter` to study it. Each field has its own folder\n" +
 	"under `~/.termstudy/notes/<field>` and `~/.termstudy/decks/<field>`.\n\n" +
+	"## Managing content in the app\n\n" +
+	"You don't have to touch the filesystem — everything is editable in-app:\n\n" +
+	"- **Field picker** — `n` new field, `e` rename, `d` delete.\n" +
+	"- **Notes** screen — `a` new note, `e` edit in `$EDITOR`, `R` rename,\n" +
+	"  `d` delete.\n" +
+	"- **Review** (decks) screen — `n` new deck, `c` manage its cards, `e`\n" +
+	"  rename, `d` delete. In the card manager: `a` add, `e` edit, `d` delete.\n\n" +
+	"Destructive deletes ask for a `y` confirmation first.\n\n" +
 	"## Workflow with Claude\n\n" +
+	"You can also generate content with Claude instead of typing it:\n\n" +
 	"1. Ask Claude to generate study notes as markdown and save them under a\n" +
 	"   field's notes folder (e.g. `~/.termstudy/notes/Spanish`).\n" +
 	"2. Ask Claude to turn the notes into a flashcard deck — a JSON file in the\n" +

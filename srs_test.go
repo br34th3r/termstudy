@@ -124,3 +124,124 @@ func TestDeckRoundTripBackfillsFields(t *testing.T) {
 		t.Fatal("normalized IDs were not saved back to disk")
 	}
 }
+
+func TestCreateDeckAndAddCard(t *testing.T) {
+	dir := t.TempDir()
+
+	deck, err := CreateDeck(dir, "Irregular verbs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.Name != "Irregular verbs" || len(deck.Cards) != 0 {
+		t.Fatalf("new deck = %+v, want named with no cards", deck)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Irregular verbs.json")); err != nil {
+		t.Fatalf("deck file missing: %v", err)
+	}
+
+	// Add a card; it should be normalized and persisted to disk.
+	if err := deck.AddCard("  ir  ", "  to go  "); err != nil {
+		t.Fatal(err)
+	}
+
+	decks, err := LoadDecks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decks) != 1 || len(decks[0].Cards) != 1 {
+		t.Fatalf("reloaded decks = %+v, want one deck with one card", decks)
+	}
+	got := decks[0].Cards[0]
+	if got.Front != "ir" || got.Back != "to go" {
+		t.Fatalf("card front/back = %q/%q, want trimmed values", got.Front, got.Back)
+	}
+	if got.ID == "" || got.Ease != 2.5 {
+		t.Fatalf("added card not normalized: %+v", got)
+	}
+
+	// Re-creating the same deck is an error rather than clobbering it.
+	if _, err := CreateDeck(dir, "Irregular verbs"); err == nil {
+		t.Fatal("expected error creating a duplicate deck")
+	}
+}
+
+func TestCreateDeckRejectsBlank(t *testing.T) {
+	if _, err := CreateDeck(t.TempDir(), "   "); err == nil {
+		t.Fatal("expected error for blank deck name")
+	}
+}
+
+func TestUpdateAndRemoveCard(t *testing.T) {
+	dir := t.TempDir()
+	deck, err := CreateDeck(dir, "Edits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deck.AddCard("q1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deck.AddCard("q2", "a2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Editing a card preserves its scheduling state, changing only the faces.
+	card := deck.Cards[0]
+	card.Reps, card.Interval, card.Due = 3, 10, "2026-07-01"
+	if err := deck.UpdateCard(card, "  q1-edited  ", "a1-edited"); err != nil {
+		t.Fatal(err)
+	}
+	if card.Front != "q1-edited" || card.Back != "a1-edited" {
+		t.Fatalf("card not updated/trimmed: %+v", card)
+	}
+	if card.Reps != 3 || card.Interval != 10 || card.Due != "2026-07-01" {
+		t.Fatalf("editing clobbered scheduling state: %+v", card)
+	}
+	if err := deck.UpdateCard(card, "", "x"); err == nil {
+		t.Fatal("expected error updating with a blank front")
+	}
+
+	// Removing a card drops it and persists.
+	if err := deck.RemoveCard(deck.Cards[0]); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadDecks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded[0].Cards) != 1 || reloaded[0].Cards[0].Front != "q2" {
+		t.Fatalf("after remove, cards = %+v, want just q2", reloaded[0].Cards)
+	}
+}
+
+func TestRenameAndDeleteDeck(t *testing.T) {
+	dir := t.TempDir()
+	deck, err := CreateDeck(dir, "Before")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deck.Rename("After"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadDecks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 1 || reloaded[0].Name != "After" {
+		t.Fatalf("rename not persisted: %+v", reloaded)
+	}
+	if err := deck.Rename("   "); err == nil {
+		t.Fatal("expected error renaming to blank")
+	}
+
+	if err := deck.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	left, err := LoadDecks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("deck still present after delete: %+v", left)
+	}
+}

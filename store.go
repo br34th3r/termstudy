@@ -92,6 +92,90 @@ func loadDeck(path string) (*Deck, error) {
 	return &d, nil
 }
 
+// CreateDeck creates a new empty deck named name as a JSON file in dir and
+// returns the loaded deck, ready for cards to be added. The name doubles as the
+// filename (sanitized, with a .json extension). It errors on a blank name or if
+// a deck file with that name already exists.
+func CreateDeck(dir, name string) (*Deck, error) {
+	clean := strings.TrimSpace(name)
+	if clean == "" {
+		return nil, fmt.Errorf("invalid deck name %q", name)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, sanitizeDeckFile(clean))
+	if _, err := os.Stat(path); err == nil {
+		return nil, fmt.Errorf("deck %q already exists", filepath.Base(path))
+	}
+	d := &Deck{Name: clean, Cards: []*Card{}, path: path}
+	if err := d.Save(); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// sanitizeDeckFile derives a safe single-segment <name>.json filename from a
+// deck name.
+func sanitizeDeckFile(name string) string {
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, string(os.PathSeparator), "-")
+	name = strings.Trim(name, ".- ")
+	return name + ".json"
+}
+
+// AddCard appends a new hand-authored card (front/back only) to the deck,
+// backfills its scheduling defaults, and persists the deck to disk.
+func (d *Deck) AddCard(front, back string) error {
+	c := &Card{Front: strings.TrimSpace(front), Back: strings.TrimSpace(back)}
+	c.normalize()
+	d.Cards = append(d.Cards, c)
+	return d.Save()
+}
+
+// UpdateCard replaces a card's front/back (trimmed) and persists the deck. Only
+// the faces change; the card's SM-2 scheduling state is left intact.
+func (d *Deck) UpdateCard(c *Card, front, back string) error {
+	front = strings.TrimSpace(front)
+	back = strings.TrimSpace(back)
+	if front == "" || back == "" {
+		return fmt.Errorf("both front and back are required")
+	}
+	c.Front = front
+	c.Back = back
+	return d.Save()
+}
+
+// RemoveCard deletes card c from the deck and persists the change.
+func (d *Deck) RemoveCard(c *Card) error {
+	for i, card := range d.Cards {
+		if card == c {
+			d.Cards = append(d.Cards[:i], d.Cards[i+1:]...)
+			return d.Save()
+		}
+	}
+	return fmt.Errorf("card not found in deck")
+}
+
+// Rename changes the deck's display name and persists it. The backing filename
+// is left unchanged; decks are identified in the UI by their name field.
+func (d *Deck) Rename(name string) error {
+	clean := strings.TrimSpace(name)
+	if clean == "" {
+		return fmt.Errorf("invalid deck name %q", name)
+	}
+	d.Name = clean
+	return d.Save()
+}
+
+// Delete removes the deck's backing file from disk.
+func (d *Deck) Delete() error {
+	if d.path == "" {
+		return fmt.Errorf("deck %q has no backing file", d.Name)
+	}
+	return os.Remove(d.path)
+}
+
 // Save writes the deck back to its source file as pretty JSON.
 func (d *Deck) Save() error {
 	if d.path == "" {

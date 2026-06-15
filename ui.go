@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -16,6 +17,7 @@ const (
 	screenMenu
 	screenNotes
 	screenDecks
+	screenCards
 	screenReview
 )
 
@@ -67,6 +69,7 @@ type rootModel struct {
 	fields fieldsModel
 	notes  notesModel
 	decks  decksModel
+	cards  cardsModel
 	review reviewModel
 }
 
@@ -104,6 +107,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fields = m.fields.setSize(m.contentW(), m.contentH())
 		m.notes = m.notes.setSize(m.contentW(), m.contentH())
 		m.decks = m.decks.setSize(m.contentW(), m.contentH())
+		m.cards = m.cards.setSize(m.contentW(), m.contentH())
 		m.review = m.review.setSize(m.contentW(), m.contentH())
 		return m, nil
 
@@ -126,6 +130,15 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg.err
 		return m, nil
+
+	case manageCardsMsg:
+		m.cards = newCardsModel(msg.deck).setSize(m.contentW(), m.contentH())
+		if msg.startAdd {
+			m.cards.startAdd()
+		}
+		m.screen = screenCards
+		m.err = nil
+		return m, tea.Batch(m.cards.Init(), textinput.Blink)
 
 	case startReviewMsg:
 		m.review = newReviewModel(msg.deck).setSize(m.contentW(), m.contentH())
@@ -173,6 +186,8 @@ func (m rootModel) routeToScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notes, cmd = m.notes.update(msg)
 	case screenDecks:
 		m.decks, cmd = m.decks.update(msg)
+	case screenCards:
+		m.cards, cmd = m.cards.update(msg)
 	case screenReview:
 		m.review, cmd = m.review.update(msg)
 	}
@@ -190,6 +205,8 @@ func (m rootModel) View() string {
 		body = m.notes.view()
 	case screenDecks:
 		body = m.decks.view()
+	case screenCards:
+		body = m.cards.view()
 	case screenReview:
 		body = m.review.view()
 	}

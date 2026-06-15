@@ -36,13 +36,16 @@ type openFieldMsg struct{ field string }
 // fieldsModel is the entry screen: it lists study fields and lets the user
 // create new ones. Picking a field scopes the rest of the app to it.
 type fieldsModel struct {
-	cfg      Config
-	list     list.Model
-	input    textinput.Model
-	creating bool
-	loadErr  error
-	width    int
-	height   int
+	cfg        Config
+	list       list.Model
+	input      textinput.Model
+	creating   bool
+	renaming   bool   // editing the selected field's name
+	renameFrom string // original name while renaming
+	confirming bool   // delete confirmation pending
+	loadErr    error
+	width      int
+	height     int
 }
 
 func newFieldsModel(cfg Config) fieldsModel {
@@ -74,6 +77,25 @@ func (m fieldsModel) createField(name string) tea.Cmd {
 	return func() tea.Msg {
 		field, err := cfg.CreateField(name)
 		return fieldCreatedMsg{field: field, err: err}
+	}
+}
+
+func (m fieldsModel) renameField(old, newName string) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		name, err := cfg.RenameField(old, newName)
+		return fieldCreatedMsg{field: name, err: err}
+	}
+}
+
+func (m fieldsModel) deleteField(name string) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		if err := cfg.DeleteField(name); err != nil {
+			return errMsg{err}
+		}
+		fields, err := LoadFields(cfg)
+		return fieldsLoadedMsg{fields: fields, err: err}
 	}
 }
 
@@ -111,26 +133,11 @@ func (m fieldsModel) update(msg tea.Msg) (fieldsModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.creating {
-			switch msg.String() {
-			case "esc":
-				m.creating = false
-				m.input.Blur()
-				m.input.SetValue("")
-				return m, nil
-			case "enter":
-				name := m.input.Value()
-				m.creating = false
-				m.input.Blur()
-				m.input.SetValue("")
-				if name == "" {
-					return m, nil
-				}
-				return m, m.createField(name)
-			}
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
+		if m.creating || m.renaming {
+			return m.updateInput(msg)
+		}
+		if m.confirming {
+			return m.updateConfirmDelete(msg)
 		}
 
 		switch msg.String() {
@@ -139,8 +146,26 @@ func (m fieldsModel) update(msg tea.Msg) (fieldsModel, tea.Cmd) {
 		case "n":
 			m.creating = true
 			m.loadErr = nil
+			m.input.SetValue("")
 			m.input.Focus()
 			return m, textinput.Blink
+		case "e":
+			if it, ok := m.list.SelectedItem().(fieldItem); ok {
+				m.renaming = true
+				m.renameFrom = it.field.Name
+				m.loadErr = nil
+				m.input.SetValue(it.field.Name)
+				m.input.CursorEnd()
+				m.input.Focus()
+				return m, textinput.Blink
+			}
+			return m, nil
+		case "d":
+			if _, ok := m.list.SelectedItem().(fieldItem); ok {
+				m.confirming = true
+				m.loadErr = nil
+			}
+			return m, nil
 		case "r":
 			return m, m.loadFields()
 		case "enter":
@@ -155,6 +180,46 @@ func (m fieldsModel) update(msg tea.Msg) (fieldsModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+// updateInput drives the shared text input used for creating and renaming.
+func (m fieldsModel) updateInput(msg tea.KeyMsg) (fieldsModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.creating, m.renaming = false, false
+		m.input.Blur()
+		m.input.SetValue("")
+		return m, nil
+	case "enter":
+		name := m.input.Value()
+		creating := m.creating
+		from := m.renameFrom
+		m.creating, m.renaming = false, false
+		m.input.Blur()
+		m.input.SetValue("")
+		if name == "" {
+			return m, nil
+		}
+		if creating {
+			return m, m.createField(name)
+		}
+		return m, m.renameField(from, name)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// updateConfirmDelete handles the y/n confirmation for deleting a field.
+func (m fieldsModel) updateConfirmDelete(msg tea.KeyMsg) (fieldsModel, tea.Cmd) {
+	m.confirming = false
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	if it, ok := m.list.SelectedItem().(fieldItem); ok {
+		return m, m.deleteField(it.field.Name)
+	}
+	return m, nil
 }
 
 // selectByName moves the cursor to the named field if it is present.
@@ -174,6 +239,12 @@ func (m fieldsModel) view() string {
 				"\n\nCreates matching folders under notes/ and decks/.")
 		return lipgloss.JoinVertical(lipgloss.Left, prompt, helpBar("enter create · esc cancel"))
 	}
+	if m.renaming {
+		prompt := lipgloss.NewStyle().Padding(1, 2).Render(
+			"Rename field:\n\n" + m.input.View() +
+				"\n\nMoves its notes/ and decks/ folders to the new name.")
+		return lipgloss.JoinVertical(lipgloss.Left, prompt, helpBar("enter save · esc cancel"))
+	}
 	if m.loadErr != nil {
 		return errLine(m.loadErr) + "\n" + helpBar("n new field · r refresh · esc quit")
 	}
@@ -183,7 +254,14 @@ func (m fieldsModel) view() string {
 				"with its own notes and flashcards.\n\nPress 'n' to create your first field.")
 		return lipgloss.JoinVertical(lipgloss.Left, msg, helpBar("n new field · esc quit"))
 	}
-	help := helpBar("↑/↓ select · enter open · n new field · r refresh · esc quit")
+	help := helpBar("↑/↓ select · enter open · n new · e rename · d delete · r refresh · esc quit")
+	if m.confirming {
+		name := ""
+		if it, ok := m.list.SelectedItem().(fieldItem); ok {
+			name = it.field.Name
+		}
+		help = helpBar(fmt.Sprintf("delete field %q and ALL its notes & decks? y confirm · any other key cancel", name))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.list.View(), help)
 }
 
