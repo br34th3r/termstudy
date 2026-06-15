@@ -5,14 +5,28 @@ A Go (Bubble Tea) terminal app for studying markdown notes and SM-2 flashcards.
 ## Layout
 
 - `main.go` — entry point, flags (`-notes`, `-decks`, `-paths`), program setup.
-- `config.go` — resolves `~/.termstudy/{notes,decks}`, first-run seeding, note discovery.
+- `config.go` — resolves `~/.termstudy/{notes,decks}`, first-run seeding, note
+  discovery, and the **field** model (`Field`, `LoadFields`, `Config.ForField`,
+  `Config.CreateField`, loose-file migration).
 - `srs.go` — `Card` type and the SM-2 algorithm (`Card.Review`, `Card.IsDue`). Pure logic.
 - `store.go` — `Deck` type, loading/saving JSON decks, due-card selection.
 - `ui.go` — root model: screen routing, main menu, shared styles/helpers.
+- `fields.go` — field picker (entry screen): lists subjects, creates new ones.
 - `notes.go` — notes browser (list + glamour preview, shell-out to `$EDITOR`).
 - `decks.go` — deck list with due counts, launches review sessions.
 - `review.go` — review session UI (reveal, grade, requeue, persist).
 - `srs_test.go` — tests for SM-2 progression and deck round-tripping.
+- `config_test.go` — tests for field seeding, migration, creation, and scoping.
+
+## Fields
+
+Notes and decks are organized into **fields** (subjects, e.g. CyberSecurity,
+Spanish). A field is a subdirectory shared by the notes and decks trees:
+`~/.termstudy/notes/<field>` and `~/.termstudy/decks/<field>`. The app opens on
+the field picker (`screenFields`); selecting a field hands the notes/decks
+sub-models a `Config.ForField(field)`-scoped config, then routes to the menu.
+On first run a `general` field is seeded; pre-field loose top-level files are
+migrated into `general` on startup so nothing is hidden.
 
 ## Conventions
 
