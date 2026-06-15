@@ -24,6 +24,15 @@ func main() {
 
 	if *showPath {
 		fmt.Printf("notes: %s\ndecks: %s\n", cfg.NotesDir, cfg.DecksDir)
+		fields, err := LoadFields(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "termstudy: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("fields:\n")
+		for _, f := range fields {
+			fmt.Printf("  %s (%d notes, %d decks)\n", f.Name, f.Notes, f.Decks)
+		}
 		return
 	}
 

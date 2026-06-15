@@ -12,7 +12,8 @@ import (
 type screen int
 
 const (
-	screenMenu screen = iota
+	screenFields screen = iota
+	screenMenu
 	screenNotes
 	screenDecks
 	screenReview
@@ -56,12 +57,14 @@ func (m menuItem) FilterValue() string { return m.title }
 // rootModel owns the sub-models and routes input to the active screen.
 type rootModel struct {
 	cfg    Config
+	field  string // active field; notes/decks are scoped to it
 	screen screen
 	width  int
 	height int
 	err    error
 
 	menu   list.Model
+	fields fieldsModel
 	notes  notesModel
 	decks  decksModel
 	review reviewModel
@@ -80,15 +83,16 @@ func newRootModel(cfg Config) rootModel {
 
 	return rootModel{
 		cfg:    cfg,
-		screen: screenMenu,
+		screen: screenFields,
 		menu:   l,
+		fields: newFieldsModel(cfg),
 		notes:  newNotesModel(cfg),
 		decks:  newDecksModel(cfg),
 	}
 }
 
 func (m rootModel) Init() tea.Cmd {
-	return tea.Batch(m.notes.Init(), m.decks.Init())
+	return m.fields.Init()
 }
 
 func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -97,6 +101,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		// Propagate size to every sub-model so switching is seamless.
+		m.fields = m.fields.setSize(m.contentW(), m.contentH())
 		m.notes = m.notes.setSize(m.contentW(), m.contentH())
 		m.decks = m.decks.setSize(m.contentW(), m.contentH())
 		m.review = m.review.setSize(m.contentW(), m.contentH())
@@ -106,6 +111,17 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = msg.to
 		m.err = nil
 		return m, nil
+
+	case openFieldMsg:
+		// Scope the notes and decks sub-models to the chosen field's folders.
+		m.field = msg.field
+		fcfg := m.cfg.ForField(msg.field)
+		m.notes = newNotesModel(fcfg).setSize(m.contentW(), m.contentH())
+		m.decks = newDecksModel(fcfg).setSize(m.contentW(), m.contentH())
+		m.menu.Title = "termstudy · " + msg.field
+		m.screen = screenMenu
+		m.err = nil
+		return m, tea.Batch(m.notes.Init(), m.decks.Init())
 
 	case errMsg:
 		m.err = msg.err
@@ -139,10 +155,17 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m rootModel) routeToScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.screen {
+	case screenFields:
+		m.fields, cmd = m.fields.update(msg)
 	case screenMenu:
-		if k, ok := msg.(tea.KeyMsg); ok && (k.String() == "enter") {
-			if it, ok := m.menu.SelectedItem().(menuItem); ok {
-				return m, switchTo(it.target)
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
+			case "enter":
+				if it, ok := m.menu.SelectedItem().(menuItem); ok {
+					return m, switchTo(it.target)
+				}
+			case "esc":
+				return m, switchTo(screenFields)
 			}
 		}
 		m.menu, cmd = m.menu.Update(msg)
@@ -159,6 +182,8 @@ func (m rootModel) routeToScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m rootModel) View() string {
 	var body string
 	switch m.screen {
+	case screenFields:
+		body = m.fields.view()
 	case screenMenu:
 		body = m.menu.View()
 	case screenNotes:
